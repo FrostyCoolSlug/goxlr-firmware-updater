@@ -14,20 +14,22 @@ pub fn status_check(sender: UnboundedSender<Message>) {
         let mut beta_running = false;
         let mut utility_running = false;
 
-        unsafe {
-            let tasks = tasklist::Tasklist::new();
+        #[cfg(target_os = "windows")] {
+            unsafe {
+                let tasks = tasklist::Tasklist::new();
 
-            tasks.for_each(|task| {
-                if task.get_pname() == APP {
-                    app_running = true;
-                }
-                if task.get_pname() == BETA {
-                    beta_running = true;
-                }
-                if task.get_pname() == UTIL {
-                    utility_running = true;
-                }
-            });
+                tasks.for_each(|task| {
+                    if task.get_pname() == APP {
+                        app_running = true;
+                    }
+                    if task.get_pname() == BETA {
+                        beta_running = true;
+                    }
+                    if task.get_pname() == UTIL {
+                        utility_running = true;
+                    }
+                });
+            }
         }
 
         // Fire off the message..
