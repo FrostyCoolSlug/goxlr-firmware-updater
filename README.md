@@ -1,5 +1,5 @@
 <p align="center">
-<h1>This tool may brick your GoXLR, proceed at your own risk</h1>
+<h1>This tool may brick your GoXLR.<br />Proceed at your own risk</h1>
 </p>
 
 __GoXLR Firmware Updater__
