@@ -1,6 +1,4 @@
-<p align="center">
-<h1>This tool may brick your GoXLR.<br />Proceed at your own risk</h1>
-</p>
+<h1 align="center">This tool may brick your GoXLR.<br />Proceed at your own risk</h1>
 
 __GoXLR Firmware Updater__
 
