@@ -1,7 +1,9 @@
+mod downloader;
 mod firmware;
 mod goxlr;
 mod preflight;
 
+use crate::downloader::download_firmware;
 use crate::firmware::VersionNumber;
 use crate::goxlr::{Device, GoXLR};
 use crate::preflight::status_check;
@@ -137,6 +139,8 @@ pub enum Message {
 #[derive(Debug, Clone)]
 pub enum StepMessages {
     SetDevice(Device),
+    SelectFile(Option<PathBuf>),
+    SetUpdateType(SelectUpdateOption),
     SetFirmware(FirmwareDetails),
     ClearFirmware(),
 }
@@ -165,12 +169,18 @@ impl Steps {
                     devices: None,
                     selected: None,
                 },
+                Step::UpdateMethod {
+                    sender: sender.clone(),
+                    selected: None,
+                },
                 Step::SelectFile {
                     sender,
                     file_valid: false,
                     file: None,
+                    progress: 0,
                     downgrade: false,
                     device: None,
+                    fetch_method: None,
                     details: None,
                 },
                 Step::RunUpdate {
@@ -203,6 +213,42 @@ impl Steps {
                     }
                     if let Step::RunUpdate { device, .. } = step {
                         device.replace(selected_device.clone());
+                    }
+                }
+            }
+            StepMessages::SetUpdateType(update_type) => {
+                for step in &mut self.steps {
+                    if let Step::SelectFile { fetch_method, .. } = step {
+                        fetch_method.replace(update_type);
+                    }
+                }
+            }
+            StepMessages::SelectFile(selected) => {
+                for step in &mut self.steps {
+                    if let Step::SelectFile {
+                        file,
+                        downgrade,
+                        details,
+                        ..
+                    } = step
+                    {
+                        if let Some(path) = &selected {
+                            file.replace(path.clone());
+
+                            // Untick the box.
+                            *downgrade = false;
+                            if let Ok(firmware) = firmware::check_firmware(path.clone()) {
+                                details.replace(FirmwareDetails {
+                                    path: path.clone(),
+                                    device_type: firmware.device,
+                                    version: firmware.version,
+                                });
+                            } else {
+                                *details = None;
+                            }
+
+                            file.replace(path.clone());
+                        }
                     }
                 }
             }
@@ -299,10 +345,16 @@ enum Step {
         devices: Option<Vec<Device>>,
         selected: Option<usize>,
     },
+    UpdateMethod {
+        sender: UnboundedSender<Message>,
+        selected: Option<SelectUpdateOption>,
+    },
     SelectFile {
         sender: UnboundedSender<Message>,
         file_valid: bool,
         device: Option<Device>,
+        fetch_method: Option<SelectUpdateOption>,
+        progress: u8,
         file: Option<PathBuf>,
         details: Option<FirmwareDetails>,
         downgrade: bool,
@@ -326,6 +378,12 @@ enum Step {
     Finish,
 }
 
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum SelectUpdateOption {
+    Download,
+    File,
+}
+
 #[derive(Debug, Clone)]
 pub enum PageMessages {
     NoneBool(bool),
@@ -334,8 +392,12 @@ pub enum PageMessages {
     ToggleAcceptLicenseTwo(bool),
     UpdateStatusCheck(bool, bool, bool),
     UpdateDeviceList(Vec<Device>),
+    SelectFirmwareOption(SelectUpdateOption),
     SelectDevice(usize),
+
     SelectFirmware,
+    DownloadFirmwarePercent(u8),
+
     SetAcceptDowngrade(bool),
     SetFirmwareValid(bool),
 
@@ -358,6 +420,22 @@ impl<'a> Step {
         if let Step::LocateGoXLR { goxlr, .. } = self {
             let clone = goxlr.clone();
             thread::spawn(move || clone.lock().unwrap().find_devices());
+        }
+
+        if let Step::SelectFile {
+            sender,
+            device,
+            fetch_method: Some(method),
+            ..
+        } = self
+        {
+            if method == &SelectUpdateOption::Download {
+                if let Some(device) = device {
+                    let sender = sender.clone();
+                    let device_type = device.device_type;
+                    thread::spawn(move || download_firmware(sender, device_type));
+                }
+            }
         }
 
         if let Step::RunUpdate {
@@ -432,36 +510,33 @@ impl<'a> Step {
                     }
                 }
             }
+            PageMessages::SelectFirmwareOption(method) => {
+                if let Step::UpdateMethod { sender, selected } = self {
+                    *selected = Some(method);
+                    let _ = sender.send(Message::StepsMessage(StepMessages::SetUpdateType(method)));
+                }
+            }
+
+            PageMessages::DownloadFirmwarePercent(percent) => {
+                if let Step::SelectFile { progress, .. } = self {
+                    *progress = percent
+                }
+            }
 
             PageMessages::SelectFirmware => {
-                if let Some(file_selected) = FileDialog::new()
-                    .add_filter("GoXLR Firmware", &["bin"])
-                    .set_directory("/")
-                    .pick_file()
-                {
-                    if let Step::SelectFile {
-                        details,
-                        file,
-                        downgrade,
-                        ..
-                    } = self
+                if let Step::SelectFile { sender, .. } = self {
+                    if let Some(file_selected) = FileDialog::new()
+                        .add_filter("GoXLR Firmware", &["bin"])
+                        .set_directory("/")
+                        .pick_file()
                     {
-                        file.replace(file_selected.clone());
-
-                        // Untick the box.
-                        *downgrade = false;
-                        if let Ok(firmware) = firmware::check_firmware(file_selected.clone()) {
-                            details.replace(FirmwareDetails {
-                                path: file_selected,
-                                device_type: firmware.device,
-                                version: firmware.version,
-                            });
-                        } else {
-                            *details = None;
-                        }
+                        let _ = sender.send(Message::StepsMessage(StepMessages::SelectFile(Some(
+                            file_selected,
+                        ))));
                     }
                 }
             }
+
             PageMessages::SetAcceptDowngrade(value) => {
                 if let Step::SelectFile { downgrade, .. } = self {
                     *downgrade = value
@@ -507,6 +582,14 @@ impl<'a> Step {
             Step::LicenseTwo { .. } => "TC-Helicon License Agreement",
             Step::Status { .. } => "Checking Environment",
             Step::LocateGoXLR { .. } => "Locating GoXLRs",
+            Step::UpdateMethod { .. } => "Select Update Method",
+            Step::SelectFile { fetch_method: Some(method), file, .. } => match method {
+                SelectUpdateOption::Download => match file {
+                    None => "Downloading Firmware",
+                    Some(_) => "Download Complete",
+                },
+                SelectUpdateOption::File => "Select Firmware File",
+            },
             Step::SelectFile { .. } => "Select Firmware File",
             Step::RunUpdate { .. } => "Updating..",
             Step::Finish => "Finished.",
@@ -524,6 +607,14 @@ impl<'a> Step {
             }
             Step::Status { .. } => "Please ensure all GoXLR apps are closed before continuing",
             Step::LocateGoXLR { .. } => "Please select a GoXLR from the list below",
+            Step::UpdateMethod { .. } => "Please Select the update method",
+            Step::SelectFile { fetch_method: Some(method), file, .. } => match method {
+                SelectUpdateOption::Download => match file {
+                    None => "Please wait while the firmware downloads from TC-Helicon's servers",
+                    Some(_) => "Please continue when ready"
+                }
+                SelectUpdateOption::File => "Please select the correct firmware file for your GoXLR"
+            }
             Step::SelectFile { .. } => "Please select the correct firmware file for your GoXLR",
             Step::RunUpdate { .. } => "Firmware updating, do not power off your GoXLR or computer",
             Step::Finish => "Update has been completed",
@@ -539,6 +630,7 @@ impl<'a> Step {
                 app, beta, util, ..
             } => *app && *beta && *util,
             Step::LocateGoXLR { selected, .. } => selected.is_some(),
+            Step::UpdateMethod { .. } => true,
             Step::SelectFile { file_valid, .. } => *file_valid,
             Step::RunUpdate { complete, .. } => *complete,
             Step::Finish => false,
@@ -562,14 +654,25 @@ impl<'a> Step {
                 sender,
                 ..
             } => self.find_goxlr(*selected, devices, sender.clone()),
+            Step::UpdateMethod { selected, .. } => self.select_choice(*selected),
             Step::SelectFile {
                 sender,
+                fetch_method,
                 details,
                 device,
+                progress,
                 file,
                 downgrade,
                 ..
-            } => self.select_file(sender.clone(), details, device, file, downgrade),
+            } => self.select_file(
+                sender.clone(),
+                fetch_method,
+                details,
+                device,
+                file,
+                *progress,
+                downgrade,
+            ),
             Step::RunUpdate {
                 stage,
                 percentage,
@@ -717,15 +820,47 @@ Click Next to continue.
         container(column![text("Please Wait..")]).into()
     }
 
+    fn select_choice(&self, selected: Option<SelectUpdateOption>) -> Element<'a, PageMessages> {
+        let download = radio(
+            "Download Latest",
+            SelectUpdateOption::Download,
+            selected,
+            PageMessages::SelectFirmwareOption,
+        );
+        let file = radio(
+            "Select File",
+            SelectUpdateOption::File,
+            selected,
+            PageMessages::SelectFirmwareOption,
+        );
+
+        container(column![download, file].spacing(10)).into()
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn select_file(
         &self,
         sender: UnboundedSender<Message>,
+        fetch_method: &Option<SelectUpdateOption>,
         details: &Option<FirmwareDetails>,
         device: &Option<Device>,
         file: &Option<PathBuf>,
+        progress: u8,
         downgrade: &bool,
     ) -> Element<'a, PageMessages> {
-        let button = button("Select Firmware").on_press(PageMessages::SelectFirmware);
+        // For the selection, there are now two options.. The first is waiting for a download to
+        // complete and providing a file, the second is allowing the user to directly select a
+        // file, so we need a bit of potential sh
+
+        let button = match fetch_method {
+            None => Some(button("Select Firmware")),
+            Some(option) => match option {
+                SelectUpdateOption::Download => None,
+                SelectUpdateOption::File => {
+                    Some(button("Select Firmware").on_press(PageMessages::SelectFirmware))
+                }
+            },
+        };
 
         // Firstly, create a top row for selecting the file..
         let mut header = row![];
@@ -735,17 +870,48 @@ Click Next to continue.
             "No File Selected".to_string()
         };
 
-        let file_box = container(text(file_text))
-            .padding(Padding {
-                top: 5.0,
-                right: 0.0,
-                bottom: 0.0,
-                left: 0.0,
-            })
-            .width(Length::Fill);
+        // We need to define the 'File' box based on whether we're downloading a firmware, or
+        // asking the user to select..
+        let file_box = if fetch_method == &Some(SelectUpdateOption::Download) {
+            let progress_bar = progress_bar(0.0..=100.0, progress as f32).width(Length::Fill);
+            let progress_text =
+                container(text(format!("{}%", progress)))
+                    .width(50)
+                    .padding(Padding {
+                        top: 5.0,
+                        right: 0.0,
+                        bottom: 0.0,
+                        left: 5.0,
+                    });
+
+            if let Some(file) = file {
+                let file_text = format!("{}", file.file_name().unwrap().to_string_lossy());
+                container(text(file_text))
+                    .padding(Padding {
+                        top: 5.0,
+                        right: 0.0,
+                        bottom: 0.0,
+                        left: 0.0,
+                    })
+                    .width(Length::Fill)
+            } else {
+                container(row![progress_bar, progress_text])
+            }
+        } else {
+            container(text(file_text))
+                .padding(Padding {
+                    top: 5.0,
+                    right: 0.0,
+                    bottom: 0.0,
+                    left: 0.0,
+                })
+                .width(Length::Fill)
+        };
 
         header = header.push(file_box);
-        header = header.push(button);
+        if let Some(button) = button {
+            header = header.push(button);
+        }
         let header = container(header).padding(Padding {
             top: 0.0,
             right: 0.0,
