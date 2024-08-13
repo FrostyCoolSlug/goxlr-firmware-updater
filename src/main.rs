@@ -822,7 +822,7 @@ Click Next to continue.
 
     fn select_choice(&self, selected: Option<SelectUpdateOption>) -> Element<'a, PageMessages> {
         let download = radio(
-            "Download Latest",
+            "Download Latest (EXPERIMENTAL)",
             SelectUpdateOption::Download,
             selected,
             PageMessages::SelectFirmwareOption,
