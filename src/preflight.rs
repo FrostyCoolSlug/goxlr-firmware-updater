@@ -3,18 +3,22 @@ use std::thread::sleep;
 use std::time::Duration;
 use tokio::sync::mpsc::UnboundedSender;
 
-#[allow(dead_code)] const APP: &str = "GoXLR App.exe";
-#[allow(dead_code)] const BETA: &str = "GoXLR Beta App.exe";
-#[allow(dead_code)] const UTIL: &str = "goxlr-daemon.exe";
-
+#[allow(dead_code)]
+const APP: &str = "GoXLR App.exe";
+#[allow(dead_code)]
+const BETA: &str = "GoXLR Beta App.exe";
+#[allow(dead_code)]
+const UTIL: &str = "goxlr-daemon.exe";
 
 pub fn status_check(sender: UnboundedSender<Message>) {
     println!("Starting Task Checker..");
     let mut system = None;
 
-    #[cfg(target_family = "unix")] {
+    #[cfg(target_family = "unix")]
+    {
         use sysinfo::{ProcessRefreshKind, RefreshKind, System, UpdateKind};
-        let refresh_kind = RefreshKind::new().with_processes(ProcessRefreshKind::new().with_user(UpdateKind::Always));
+        let refresh_kind = RefreshKind::new()
+            .with_processes(ProcessRefreshKind::new().with_user(UpdateKind::Always));
         system.replace(System::new_with_specifics(refresh_kind));
     }
 
@@ -23,7 +27,8 @@ pub fn status_check(sender: UnboundedSender<Message>) {
         let mut beta_running = false;
         let mut utility_running = false;
 
-        #[cfg(target_os = "windows")] {
+        #[cfg(target_os = "windows")]
+        {
             unsafe {
                 let tasks = tasklist::Tasklist::new();
 
@@ -40,7 +45,8 @@ pub fn status_check(sender: UnboundedSender<Message>) {
                 });
             }
         }
-        #[cfg(target_family = "unix")] {
+        #[cfg(target_family = "unix")]
+        {
             if let Some(system) = &mut system {
                 system.refresh_processes();
                 let count = system.processes_by_exact_name("goxlr-daemon").count();
